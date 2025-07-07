@@ -1,0 +1,80 @@
+from copy import deepcopy
+import numpy as np
+from mushroom_rl.algorithms.value.td.td import TD
+from mushroom_rl.utils.table import EnsembleTable
+
+class Bootstrapped(TD):
+    def __init__(self, mdp_info, policy, learning_rate, n_approximators=10,
+                 mu=0., sigma=1., p=2 / 3., cross_update=False):
+        self._n_approximators = n_approximators
+        self._mu = mu
+        self._sigma = sigma
+        self._p = p
+        self._cross_update = cross_update
+        self._mask = np.random.binomial(1, self._p, self._n_approximators)
+        self.Q = EnsembleTable(self._n_approximators, mdp_info.size)
+        for i in range(len(self.Q.model)):
+            self.Q.model[i].table = np.random.randn(
+                *self.Q[i].shape) * self._sigma + self._mu
+        super(Bootstrapped, self).__init__(mdp_info, policy, self.Q, learning_rate)
+        self.alpha = [deepcopy(self.alpha)] * n_approximators
+
+    def episode_start(self):
+        self.policy.set_idx(np.random.randint(self._n_approximators))
+        return super(Bootstrapped, self).episode_start()
+
+    def _update(self, state, action, reward, next_state, absorbing):
+        raise NotImplementedError
+
+class BootstrappedDoubleQLearning(Bootstrapped):
+    def __init__(self, mdp_info, policy, learning_rate, n_approximators=10,
+                 mu=0., sigma=1., p=1., cross_update=False):
+        super(BootstrappedDoubleQLearning, self).__init__(mdp_info, policy, learning_rate, n_approximators, mu, sigma, p, cross_update)
+        self.Qs = [EnsembleTable(n_approximators, mdp_info.size),
+                   EnsembleTable(n_approximators, mdp_info.size)]
+        
+        for i in range(len(self.Qs[0])):
+            self.Qs[0][i].table = np.random.randn(
+                *self.Qs[0][i].shape) * self._sigma + self._mu
+            
+        for i in range(len(self.Qs[1])):
+            self.Qs[1][i].table = self.Qs[0][i].table.copy()
+            self.Q[i].table = self.Qs[0][i].table.copy()
+        self.alpha = [deepcopy(self.alpha), deepcopy(self.alpha)]
+
+    def _update(self, state, action, reward, next_state, absorbing):
+        if np.random.uniform() < .5:
+            i_q = 0
+        else:
+            i_q = 1
+        q_current = np.array([x[state, action] for x in self.Qs[i_q]])
+        if not absorbing:
+            for i in np.argwhere(self._mask).ravel():
+                if self._cross_update:
+                    idx = np.random.randint(self._n_approximators)
+                else:
+                    idx = i
+                idx = int(idx)
+                try:
+                    check_if_array = next_state.shape
+                except:
+                    next_state = np.array(next_state)                 
+                q_ss = self.Qs[i_q].predict(next_state, idx=idx)
+                max_q = np.max(q_ss)
+                a_n = np.array(
+                    [np.random.choice(np.argwhere(q_ss == max_q).ravel())])
+                q_next = self.Qs[1-i_q].predict(next_state, a_n, idx=idx)
+                self.Qs[i_q][i][state, action] = q_current[i] + self.alpha[i_q][i](
+                    state, action) * (
+                        reward + self.mdp_info.gamma * q_next - q_current[i])
+                self._update_Q(state, action, idx=i)
+        else:
+            for i in np.argwhere(self._mask).ravel():
+                self.Qs[i_q][i][state, action] = q_current[i] + self.alpha[i_q][i](
+                    state, action) * (reward - q_current[i])
+                self._update_Q(state, action, idx=i)
+        self._mask = np.random.binomial(1, self._p, self._n_approximators)
+
+    def _update_Q(self, state, action, idx):
+        self.Q[idx][state, action] = np.mean(
+            [q[idx][state, action] for q in self.Qs])
