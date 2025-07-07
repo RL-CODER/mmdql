@@ -1,0 +1,1 @@
+This repository contains the coded implementations for the paper "From Wasserstein to Maximum Mean Discrepancy Barycenters: A Novel Framework for Uncertainty Propagation in Model-Free Reinforcement Learning."
